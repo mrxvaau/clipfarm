@@ -1,0 +1,21 @@
+# secrets
+.env
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# local data
+clips.db
+work/
+output/
+
+# big local files
+*.mp4
+*.wav
+models/
+*.bin
+
+streamers.yaml

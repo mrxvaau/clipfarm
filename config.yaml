@@ -1,0 +1,25 @@
+# ---- clipfarm config ----
+game_name: "Grand Theft Auto VI"   # Twitch category name (may not exist until launch)
+poll_minutes: 15
+lookback_hours: 24
+db_path: clips.db
+dashboard_port: 5000
+
+paths:
+  work_dir: work         # temp files per clip
+  output_dir: output     # finished drafts + credit files
+
+tools:
+  ffmpeg: ffmpeg
+  ytdlp: yt-dlp
+  # Path to whisper.cpp CLI (whisper-cli.exe on Windows). Leave empty to skip captions.
+  whisper_cli: ""
+  # Path to ggml model file, e.g. models/ggml-small.bin
+  whisper_model: ""
+  whisper_language: "auto"
+
+render:
+  # libx264 works everywhere. On your AMD card you can try h264_amf (Windows) for speed.
+  video_encoder: libx264
+  caption_font_size: 64
+  caption_margin_v: 300

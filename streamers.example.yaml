@@ -1,0 +1,7 @@
+# permission: confirmed  -> shown in the dashboard and allowed to download/process
+# permission: pending    -> scouting only, the processor REFUSES these
+# Only set "confirmed" after the streamer has actually said yes (keep proof).
+streamers:
+  - {login: kaicenat,    platform: twitch, permission: pending}
+  - {login: loserfruit,  platform: twitch, permission: pending}
+  # add more: - {login: name, platform: twitch, permission: pending}
