@@ -35,7 +35,7 @@ def load_config(path=None):
         cfg["tools"].setdefault(k, v)
     cfg.setdefault("render", {})
     for k, v in {"video_encoder": "libx264", "caption_font_size": 64,
-                 "caption_margin_v": 300}.items():
+                 "caption_margin_v": 300, "mode": "blur", "crop_x": 0.5}.items():
         cfg["render"].setdefault(k, v)
     cfg["_root"] = str(ROOT)
     return cfg

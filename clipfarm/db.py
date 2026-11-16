@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS clips (
   score REAL DEFAULT 0,
   permission TEXT DEFAULT 'unknown',
   status TEXT DEFAULT 'new',
-  out_path TEXT
+  out_path TEXT,
+  trim_start REAL, trim_end REAL, fit_mode TEXT, crop_x REAL
 );
 CREATE INDEX IF NOT EXISTS idx_clips_status_score ON clips(status, score DESC);
 """
@@ -24,6 +25,12 @@ def connect(path):
     conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    # migrate databases created before the trim/crop columns existed
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(clips)")}
+    for col, typ in (("trim_start", "REAL"), ("trim_end", "REAL"), ("fit_mode", "TEXT"), ("crop_x", "REAL")):
+        if col not in have:
+            conn.execute(f"ALTER TABLE clips ADD COLUMN {col} {typ}")
+    conn.commit()
     return conn
 
 
@@ -90,3 +97,12 @@ def refresh_permissions(conn, perm_by_id, perm_by_name):
         changed += cur.rowcount
     conn.commit()
     return changed
+
+
+def set_edit(conn, clip_id, trim_start=None, trim_end=None, fit_mode=None, crop_x=None):
+    """Store the per-clip cut/crop choices used by the renderer (None = use defaults)."""
+    cur = conn.execute(
+        "UPDATE clips SET trim_start=?, trim_end=?, fit_mode=?, crop_x=? WHERE id=?",
+        (trim_start, trim_end, fit_mode, crop_x, clip_id))
+    conn.commit()
+    return cur.rowcount > 0

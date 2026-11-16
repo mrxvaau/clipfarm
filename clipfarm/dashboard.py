@@ -5,7 +5,7 @@ from flask import Flask, redirect, render_template_string, request, url_for
 
 from . import db
 from .config import load_config
-from .process import process_clip
+from .process import MODES, parse_time, process_clip, validate_edit
 from .scoring import hours_between
 
 TEMPLATE = """
@@ -23,12 +23,15 @@ TEMPLATE = """
  .ok{background:#2f9e44}.no{background:#c92a2a}.go{background:#3b5bdb}
  .badge{font-size:11px;padding:2px 6px;border-radius:4px;background:#444;margin-left:6px}
  .badge.confirmed{background:#2f9e44}.warn{background:#5c3b00;padding:8px;border-radius:6px;margin-top:10px}
+ .edit{margin-top:8px;font-size:13px;color:#ccc} .edit input,.edit select{background:#222;color:#eee;border:1px solid #444;border-radius:4px;padding:3px;width:62px}
+ .edit select{width:auto}
 </style>
 <h2>clipfarm</h2>
 <div class="tabs">
  {% for t in tabs %}<a class="{{ 'on' if t==tab else '' }}" href="{{ url_for('index', tab=t, scout=1 if scout else None) }}">{{ t }}</a>{% endfor %}
  <a href="{{ url_for('index', tab=tab, scout=None if scout else 1) }}">{{ 'hide pending' if scout else 'scouting view' }}</a>
 </div>
+{% if err %}<div class="warn">{{ err }}</div>{% endif %}
 {% if scout %}<div class="warn">Scouting view: includes streamers WITHOUT confirmed permission. You can look, but cannot shortlist or download them.</div>{% endif %}
 <div class="grid">
 {% for c in clips %}
@@ -42,7 +45,15 @@ TEMPLATE = """
    <form method="post" style="display:inline">
     {% if c.permission == 'confirmed' %}
      {% if c.status in ('new','rejected') %}<button class="ok" formaction="{{ url_for('set_status', clip_id=c.id, status='shortlisted') }}">Shortlist</button>{% endif %}
-     {% if c.status == 'shortlisted' %}<button class="go" formaction="{{ url_for('process', clip_id=c.id) }}">Download + render</button>{% endif %}
+     {% if c.status == 'shortlisted' %}
+      <div class="edit">cut
+       <input name="start" placeholder="start s" value="{{ c.trim_start if c.trim_start is not none else '' }}">
+       to <input name="end" placeholder="end s" value="{{ c.trim_end if c.trim_end is not none else '' }}">
+       <select name="mode">{% for m in modes %}<option value="{{ m }}" {{ 'selected' if (c.fit_mode or 'blur')==m else '' }}>{{ m }}</option>{% endfor %}</select>
+       crop_x <input name="crop_x" placeholder="0-1" value="{{ c.crop_x if c.crop_x is not none else '' }}">
+      </div>
+      <button class="go" formaction="{{ url_for('process', clip_id=c.id) }}">Download + render</button>
+     {% endif %}
      {% if c.status in ('new','shortlisted') %}<button class="no" formaction="{{ url_for('set_status', clip_id=c.id, status='rejected') }}">Reject</button>{% endif %}
      {% if c.status == 'downloaded' %}<button class="ok" formaction="{{ url_for('set_status', clip_id=c.id, status='posted') }}">Mark posted</button>{% endif %}
     {% endif %}
@@ -65,9 +76,9 @@ def create_app(cfg=None, conn=None):
     app.config["CF"] = cfg
     app.config["CONN"] = conn
 
-    def back():
+    def back(err=None):
         return redirect(url_for("index", tab=request.form.get("tab", "new"),
-                                scout=1 if request.form.get("scout") else None))
+                                scout=1 if request.form.get("scout") else None, err=err))
 
     @app.get("/")
     def index():
@@ -84,7 +95,8 @@ def create_app(cfg=None, conn=None):
             d["thumbnail_url"] = d.get("thumbnail_url") or ""
             d["duration"] = d.get("duration") or 0
             clips.append(type("C", (), d))
-        return render_template_string(TEMPLATE, clips=clips, tabs=TABS, tab=tab, scout=scout)
+        return render_template_string(TEMPLATE, clips=clips, tabs=TABS, tab=tab, scout=scout,
+                                      modes=MODES, err=request.args.get("err"))
 
     @app.post("/set/<clip_id>/<status>")
     def set_status(clip_id, status):
@@ -96,14 +108,26 @@ def create_app(cfg=None, conn=None):
     @app.post("/process/<clip_id>")
     def process(clip_id):
         clip = db.get_clip(conn, clip_id)
-        if clip is not None and clip["permission"] == "confirmed" and clip["status"] == "shortlisted":
-            def work():
-                c2 = db.connect(resolve_path(cfg, cfg["db_path"]))
-                try:
-                    process_clip(cfg, c2, clip_id)
-                except Exception as e:
-                    print(f"[process {clip_id}] failed: {e}")
-            threading.Thread(target=work, daemon=True).start()
+        if clip is None or clip["permission"] != "confirmed" or clip["status"] != "shortlisted":
+            return back()
+        try:
+            start = parse_time(request.form.get("start"))
+            end = parse_time(request.form.get("end"))
+            cx = request.form.get("crop_x", "").strip()
+            crop_x = float(cx) if cx else None
+            mode = request.form.get("mode") or None
+            validate_edit(start, end, mode, crop_x)
+        except ValueError as e:
+            return back(err=f"Not rendered: {e}")
+        db.set_edit(conn, clip_id, start, end, mode, crop_x)
+
+        def work():
+            c2 = db.connect(resolve_path(cfg, cfg["db_path"]))
+            try:
+                process_clip(cfg, c2, clip_id)
+            except Exception as e:
+                print(f"[process {clip_id}] failed: {e}")
+        threading.Thread(target=work, daemon=True).start()
         return back()
 
     return app

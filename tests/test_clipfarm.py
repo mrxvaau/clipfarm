@@ -137,17 +137,26 @@ def _make_test_video(path):
 
 
 def _fake_tool(path, body):
+    """Cross-platform fake executable. Returns the path to put in cfg["tools"].
+
+    Windows can't run '#!' scripts, so there we write a .py file plus a .cmd launcher.
+    """
+    if os.name == "nt":
+        script = path.with_name(path.name + "_impl.py")
+        script.write_text(body)
+        launcher = path.with_name(path.name + ".cmd")
+        launcher.write_text(f'@"{sys.executable}" "{script}" %*\r\n')
+        return launcher
     path.write_text("#!" + sys.executable + "\n" + body)
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    return path
 
 
 def test_process_end_to_end_with_fake_downloader_and_whisper(cfg, conn, tmp_path):
     src = tmp_path / "sample.mp4"
     _make_test_video(src)
-    ytdlp = tmp_path / "fake_ytdlp"
-    _fake_tool(ytdlp, f"import shutil\nshutil.copy(r'{src}', 'source.mp4')\n")
-    whisper = tmp_path / "fake_whisper"
-    _fake_tool(whisper, "open('subs.srt','w').write('1\\n00:00:00,000 --> 00:00:02,000\\nHello clip test\\n\\n')\n")
+    ytdlp = _fake_tool(tmp_path / "fake_ytdlp", f"import shutil\nshutil.copy(r'{src}', 'source.mp4')\n")
+    whisper = _fake_tool(tmp_path / "fake_whisper", "open('subs.srt','w').write('1\\n00:00:00,000 --> 00:00:02,000\\nHello clip test\\n\\n')\n")
     model = tmp_path / "model.bin"; model.write_bytes(b"x")
     cfg["tools"].update({"ytdlp": str(ytdlp), "whisper_cli": str(whisper), "whisper_model": str(model)})
     db.upsert_clip(conn, clip("c1", 500), "confirmed", iso(NOW))
@@ -163,8 +172,95 @@ def test_process_end_to_end_with_fake_downloader_and_whisper(cfg, conn, tmp_path
 def test_process_without_whisper_still_renders(cfg, conn, tmp_path):
     src = tmp_path / "sample.mp4"
     _make_test_video(src)
-    ytdlp = tmp_path / "fake_ytdlp"
-    _fake_tool(ytdlp, f"import shutil\nshutil.copy(r'{src}', 'source.mp4')\n")
+    ytdlp = _fake_tool(tmp_path / "fake_ytdlp", f"import shutil\nshutil.copy(r'{src}', 'source.mp4')\n")
     cfg["tools"].update({"ytdlp": str(ytdlp), "whisper_cli": "", "whisper_model": ""})
     db.upsert_clip(conn, clip("c2", 500), "confirmed", iso(NOW))
     assert process_clip(cfg, conn, "c2").exists()
+
+
+# ---------- trim / crop ----------
+def _probe(path, entries, stream="v:0"):
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", stream, "-show_entries",
+                        entries, "-of", "csv=p=0", str(path)], capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def test_parse_time_and_validate():
+    from clipfarm.process import parse_time, validate_edit
+    assert parse_time("12.5") == 12.5
+    assert parse_time("1:05.5") == 65.5
+    assert parse_time("0:01:05") == 65.0
+    assert parse_time("  ") is None and parse_time(None) is None
+    with pytest.raises(ValueError):
+        parse_time("abc")
+    with pytest.raises(ValueError):
+        parse_time("-3")
+    validate_edit(1.0, 5.0, "fill", 0.3)
+    with pytest.raises(ValueError):
+        validate_edit(5.0, 5.0, None, None)
+    with pytest.raises(ValueError):
+        validate_edit(None, None, "weird", None)
+    with pytest.raises(ValueError):
+        validate_edit(None, None, None, 1.5)
+
+
+def test_exact_trim_and_fill_mode_end_to_end(cfg, conn, tmp_path):
+    src = tmp_path / "sample.mp4"
+    _make_test_video(src)  # 3.0s, 1280x720
+    ytdlp = _fake_tool(tmp_path / "fake_ytdlp", f"import shutil\nshutil.copy(r'{src}', 'source.mp4')\n")
+    cfg["tools"].update({"ytdlp": str(ytdlp), "whisper_cli": "", "whisper_model": ""})
+    db.upsert_clip(conn, clip("t1", 500), "confirmed", iso(NOW))
+    out = process_clip(cfg, conn, "t1", start=1.0, end=2.5, mode="fill", crop_x=0.2)
+    assert _probe(out, "stream=width,height") == "1080,1920"
+    dur = float(_probe(out, "format=duration", stream="v:0").splitlines()[-1])
+    assert abs(dur - 1.5) < 0.15, dur
+    assert "start=1.0s end=2.5" in out.with_suffix(".txt").read_text()
+
+
+def test_saved_edit_is_used_when_no_args(cfg, conn, tmp_path):
+    src = tmp_path / "sample.mp4"
+    _make_test_video(src)
+    ytdlp = _fake_tool(tmp_path / "fake_ytdlp", f"import shutil\nshutil.copy(r'{src}', 'source.mp4')\n")
+    cfg["tools"].update({"ytdlp": str(ytdlp), "whisper_cli": "", "whisper_model": ""})
+    db.upsert_clip(conn, clip("t2", 500), "confirmed", iso(NOW))
+    db.set_edit(conn, "t2", 0.5, 2.0, "blur", None)
+    out = process_clip(cfg, conn, "t2")
+    dur = float(_probe(out, "format=duration").splitlines()[-1])
+    assert abs(dur - 1.5) < 0.15, dur
+
+
+def test_old_database_is_migrated(tmp_path):
+    import sqlite3
+    path = tmp_path / "old.db"
+    c = sqlite3.connect(path)
+    c.execute("CREATE TABLE clips (id TEXT PRIMARY KEY, url TEXT, title TEXT, broadcaster_id TEXT, "
+              "broadcaster_name TEXT, game_id TEXT, thumbnail_url TEXT, view_count INTEGER, duration REAL, "
+              "created_at TEXT, first_seen_at TEXT, last_seen_at TEXT, view_count_first INTEGER, "
+              "score REAL DEFAULT 0, permission TEXT DEFAULT 'unknown', status TEXT DEFAULT 'new', out_path TEXT)")
+    c.commit(); c.close()
+    conn = db.connect(path)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(clips)")}
+    assert {"trim_start", "trim_end", "fit_mode", "crop_x"} <= cols
+
+
+def test_dashboard_process_validates_and_saves_edit(cfg, conn, monkeypatch):
+    import time as _t
+    import clipfarm.dashboard as dash
+    calls = []
+    monkeypatch.setattr(dash, "process_clip", lambda cfg_, c_, cid: calls.append(cid))
+    db.upsert_clip(conn, clip("d1", 500), "confirmed", iso(NOW))
+    db.set_status(conn, "d1", "shortlisted")
+    c = dash.create_app(cfg, conn).test_client()
+    # invalid: end before start -> error shown, nothing saved or started
+    r = c.post("/process/d1", data={"start": "5", "end": "2", "mode": "blur"})
+    assert "Not rendered" in c.get(r.headers["Location"]).get_data(as_text=True)
+    assert db.get_clip(conn, "d1")["trim_start"] is None and not calls
+    # valid -> saved and render started
+    c.post("/process/d1", data={"start": "0:01.5", "end": "9", "mode": "fill", "crop_x": "0.3"})
+    row = db.get_clip(conn, "d1")
+    assert (row["trim_start"], row["trim_end"], row["fit_mode"], row["crop_x"]) == (1.5, 9.0, "fill", 0.3)
+    for _ in range(50):
+        if calls:
+            break
+        _t.sleep(0.05)
+    assert calls == ["d1"]

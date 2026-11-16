@@ -66,14 +66,15 @@ def cmd_dashboard(cfg, a):
 
 
 def cmd_process(cfg, a):
-    from .process import process_clip, process_shortlisted
+    from .process import parse_time, process_clip, process_shortlisted
     conn = db.connect(resolve_path(cfg, cfg["db_path"]))
     if a.all:
         done, failed = process_shortlisted(cfg, conn)
         print("done:", *done, sep="\n  ")
         print("failed:", *[f"{i}: {e}" for i, e in failed], sep="\n  ")
     else:
-        print(process_clip(cfg, conn, a.clip_id))
+        print(process_clip(cfg, conn, a.clip_id, start=parse_time(a.start), end=parse_time(a.end),
+                           mode=a.mode, crop_x=a.crop_x))
 
 
 def main(argv=None):
@@ -94,6 +95,10 @@ def main(argv=None):
     g = pr.add_mutually_exclusive_group(required=True)
     g.add_argument("--all", action="store_true", help="process every shortlisted confirmed clip")
     g.add_argument("--clip-id")
+    pr.add_argument("--start", help="cut start, seconds or m:ss (e.g. 12.5 or 0:12.5)")
+    pr.add_argument("--end", help="cut end, seconds or m:ss")
+    pr.add_argument("--mode", choices=["blur", "fill"], help="blur = whole clip over blurred bg; fill = crop a 9:16 slice")
+    pr.add_argument("--crop-x", type=float, dest="crop_x", help="fill mode slice position: 0=left, 0.5=center, 1=right")
     a = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = load_config(a.config)
